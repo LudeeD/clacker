@@ -105,14 +105,19 @@ fn first_number(words: &[&str]) -> Option<usize> {
 }
 
 fn ordinal(words: &[&str]) -> Option<usize> {
-    const ORDINALS: [&str; 10] = [
-        "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
-        "tenth",
-    ];
-    words.iter().find_map(|w| {
-        ORDINALS
-            .iter()
-            .position(|o| o == w)
-            .map(|i| i + 1)
+    words.iter().find_map(|word| {
+        Some(match *word {
+            "first" => 1,
+            "second" => 2,
+            "third" => 3,
+            "fourth" => 4,
+            "fifth" => 5,
+            "sixth" => 6,
+            "seventh" => 7,
+            "eighth" => 8,
+            "ninth" => 9,
+            "tenth" => 10,
+            _ => return None,
+        })
     })
 }

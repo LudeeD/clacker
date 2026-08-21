@@ -1,4 +1,7 @@
-//! Deliberately crude readability: enough to make a linked page skimmable.
+//! Readability extraction: pull the article out of a page and render it as
+//! markdown, which is what the harness displays.
+
+use dom_smoothie::Readability;
 
 use super::api::agent;
 
@@ -24,104 +27,25 @@ pub fn fetch(url: &str) -> Result<String, String> {
         .map_err(|e| format!("couldn't read {url}: {e}"))?;
 
     if content_type.contains("text/html") || body.trim_start().starts_with('<') {
-        Ok(extract(&body))
+        Ok(extract(&body, url))
     } else {
         Ok(body)
     }
 }
 
-/// Prefer paragraph text; fall back to the whole document when a page turns
-/// out to be one giant div soup.
-pub fn extract(html: &str) -> String {
-    let cleaned = strip_elements(html, &["script", "style", "noscript", "svg", "head"]);
-    let paragraphs: Vec<String> = block_texts(&cleaned, "p")
-        .into_iter()
-        .filter(|p| p.len() > 40)
-        .collect();
-
-    if paragraphs.len() >= 3 {
-        paragraphs.join("\n\n")
-    } else {
-        html_to_text(&cleaned)
-    }
+/// Readability picks the article out of the page; htmd renders it as markdown.
+/// When there's no article to find — a directory page, a paywall stub — we
+/// fall back to flattening the whole document.
+pub fn extract(html: &str, url: &str) -> String {
+    readable(html, url).unwrap_or_else(|| html_to_text(html))
 }
 
-/// Drop whole elements, tags and contents alike.
-fn strip_elements(html: &str, tags: &[&str]) -> String {
-    let mut out = html.to_string();
-    for tag in tags {
-        let close = format!("</{tag}>");
-        let mut from = 0;
-        while let Some(open) = find_tag(&out, tag, from) {
-            // ASCII-lowercased so byte offsets keep matching `out`.
-            let lower = out.to_ascii_lowercase();
-            match lower[open.start..].find(&close) {
-                Some(rel) => {
-                    let end = open.start + rel + close.len();
-                    out.replace_range(open.start..end, " ");
-                    from = open.start;
-                }
-                // Unclosed: drop just the tag, never the rest of the document.
-                None => {
-                    out.replace_range(open.start..open.body, " ");
-                    from = open.start + 1;
-                }
-            }
-        }
-    }
-    out
-}
-
-struct TagMatch {
-    /// Byte offset of the `<`.
-    start: usize,
-    /// Byte offset just past the `>`, i.e. where the element's body begins.
-    body: usize,
-}
-
-/// Find `<tag …>`, requiring a real tag-name boundary so `<head>` doesn't
-/// match `<header>` and `<p>` doesn't match `<pre>`.
-fn find_tag(html: &str, tag: &str, from: usize) -> Option<TagMatch> {
-    let lower = html.to_ascii_lowercase();
-    let needle = format!("<{tag}");
-    let mut cursor = from;
-
-    while let Some(rel) = lower[cursor..].find(&needle) {
-        let start = cursor + rel;
-        let after = start + needle.len();
-        let boundary = lower[after..]
-            .chars()
-            .next()
-            .is_none_or(|c| c == '>' || c == '/' || c.is_whitespace());
-        if boundary {
-            if let Some(gt) = lower[start..].find('>') {
-                return Some(TagMatch { start, body: start + gt + 1 });
-            }
-        }
-        cursor = start + 1;
-    }
-    None
-}
-
-/// Text content of every `<tag>…</tag>` block, in document order.
-fn block_texts(html: &str, tag: &str) -> Vec<String> {
-    let close = format!("</{tag}>");
-    let mut out = Vec::new();
-    let mut cursor = 0;
-
-    while let Some(open) = find_tag(html, tag, cursor) {
-        let lower = html.to_ascii_lowercase();
-        let body_end = match lower[open.body..].find(&close) {
-            Some(rel) => open.body + rel,
-            None => html.len(),
-        };
-        let text = html_to_text(&html[open.body..body_end]);
-        if !text.is_empty() {
-            out.push(text);
-        }
-        cursor = body_end.max(open.body);
-    }
-    out
+fn readable(html: &str, url: &str) -> Option<String> {
+    // `url` resolves relative links; a bad one is just a failed extraction.
+    let mut readability = Readability::new(html, Some(url), None).ok()?;
+    let article = readability.parse().ok()?;
+    let markdown = htmd::convert(&article.content).ok()?;
+    (!markdown.trim().is_empty()).then_some(markdown)
 }
 
 /// Strip tags, decode the entities that actually show up, collapse whitespace.
@@ -252,23 +176,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strips_only_the_named_element() {
-        // `<head>` must not match `<header>` — and an unclosed match must not
-        // swallow the rest of the document.
-        let html = "<head><title>x</title></head><header>Nav</header><p>Body text</p>";
-        let cleaned = strip_elements(html, &["head"]);
-        assert!(cleaned.contains("Body text"), "got: {cleaned}");
-        assert!(cleaned.contains("Nav"), "got: {cleaned}");
-        assert!(!cleaned.contains("<title>"), "got: {cleaned}");
-    }
-
-    #[test]
-    fn paragraph_blocks_ignore_similarly_named_tags() {
-        let html = "<pre>code</pre><p>first</p><p>second</p>";
-        assert_eq!(block_texts(html, "p"), vec!["first", "second"]);
-    }
-
-    #[test]
     fn tags_become_text_with_paragraph_breaks() {
         let html = "<p>One line.</p><p>Two <i>lines</i>.<br>Same para.</p>";
         assert_eq!(html_to_text(html), "One line.\n\nTwo lines.\nSame para.");
@@ -282,10 +189,33 @@ mod tests {
         );
     }
 
+    const PAGE: &str = "<html><head><title>T</title></head><body>\
+        <nav><a href='/'>Home</a> <a href='/about'>About</a></nav>\
+        <article><h2>A heading</h2>\
+        <p>The first paragraph of the article, long enough to be scored as real content by readability.</p>\
+        <p>A second paragraph, also long enough that the extractor treats this element as the article body.</p>\
+        <ul><li>a bullet</li></ul></article>\
+        <footer>Copyright nobody</footer></body></html>";
+
     #[test]
-    fn falls_back_to_full_text_when_there_are_few_paragraphs() {
-        let html = "<html><body><div>Only a div, no paragraphs at all here.</div></body></html>";
-        assert_eq!(extract(html), "Only a div, no paragraphs at all here.");
+    fn extraction_drops_boilerplate() {
+        let out = extract(PAGE, "https://example.com/post");
+        assert!(out.contains("The first paragraph"), "got: {out}");
+        assert!(!out.contains("Copyright nobody"), "got: {out}");
+        assert!(!out.contains("About"), "got: {out}");
+    }
+
+    #[test]
+    fn extraction_keeps_structure_as_markdown() {
+        let out = extract(PAGE, "https://example.com/post");
+        assert!(out.contains("## A heading"), "got: {out}");
+        assert!(out.contains("*   a bullet"), "got: {out}");
+    }
+
+    #[test]
+    fn falls_back_to_flat_text_when_there_is_no_article() {
+        let html = "<html><body><div>Nothing here.</div></body></html>";
+        assert_eq!(extract(html, "https://example.com/"), "Nothing here.");
     }
 
     #[test]
@@ -296,4 +226,5 @@ mod tests {
         assert!(cut.len() < text.len());
     }
 }
+
 
