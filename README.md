@@ -72,6 +72,21 @@ clacker mcp                # the MCP server, if you want it standalone
 CLACKER_DEBUG=1 clacker    # log unhandled requests
 ```
 
+## Roadmap
+
+Right now clacker only speaks to Claude Code. Adding another harness means
+three things: a binary to find on `PATH`, its provider's wire format, and the
+env var that points it at our server instead. The brain and the Hacker News
+code stay untouched.
+
+Wanted:
+
+- Codex, and the OpenAI wire format
+- Gemini CLI
+- opencode
+
+PRs welcome, harnesses especially.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
