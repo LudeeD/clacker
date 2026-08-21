@@ -1,4 +1,4 @@
-# clacker
+# 🪇 clacker
 
 Browse Hacker News inside Claude Code.
 
